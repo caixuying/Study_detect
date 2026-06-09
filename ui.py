@@ -7,7 +7,9 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from ai_core import StudyBehaviorDetector
 from auth import AuthError, AuthService
 from db import Database
-from network_utils import NetworkError, check_url
+from network_utils import (NetworkError, DownloadError, check_url,
+                           check_urls_batch, download_image_from_url,
+                           test_connectivity)
 from visualization import export_alert_chart
 
 
@@ -74,36 +76,52 @@ class MainFrame(ttk.Frame):
         ttk.Label(self, text=title, font=("Segoe UI", 13, "bold")).grid(
             row=0, column=0, columnspan=3, sticky="w", pady=(0, 12)
         )
+        # Row 1: AI detection
         ttk.Button(self, text="Detect Image", command=self.detect_image).grid(
             row=1, column=0, sticky="ew", padx=(0, 8), pady=4
         )
-        ttk.Button(self, text="Start Camera", command=self.start_camera).grid(
+        ttk.Button(self, text="Detect from URL", command=self.detect_from_url).grid(
             row=1, column=1, sticky="ew", padx=(0, 8), pady=4
         )
-        ttk.Button(self, text="Check Model URL", command=self.check_model_url).grid(
+        ttk.Button(self, text="Start Camera", command=self.start_camera).grid(
             row=1, column=2, sticky="ew", pady=4
         )
-        ttk.Button(self, text="Detection Records", command=self.show_records).grid(
+        # Row 2: network tools
+        ttk.Button(self, text="Check Model URL", command=self.check_model_url).grid(
             row=2, column=0, sticky="ew", padx=(0, 8), pady=4
         )
-        ttk.Button(self, text="Operation Logs", command=self.show_logs).grid(
+        ttk.Button(self, text="Batch URL Check", command=self.batch_url_check).grid(
             row=2, column=1, sticky="ew", padx=(0, 8), pady=4
         )
-        ttk.Button(self, text="Export Chart", command=self.export_chart).grid(
+        ttk.Button(self, text="Network Test", command=self.network_test).grid(
             row=2, column=2, sticky="ew", pady=4
         )
-        ttk.Button(self, text="Change Password", command=self.change_password).grid(
+        # Row 3: data & records
+        ttk.Button(self, text="Detection Records", command=self.show_records).grid(
             row=3, column=0, sticky="ew", padx=(0, 8), pady=4
+        )
+        ttk.Button(self, text="Operation Logs", command=self.show_logs).grid(
+            row=3, column=1, sticky="ew", padx=(0, 8), pady=4
+        )
+        ttk.Button(self, text="Export Chart", command=self.export_chart).grid(
+            row=3, column=2, sticky="ew", pady=4
+        )
+        # Row 4: account
+        ttk.Button(self, text="Change Password", command=self.change_password).grid(
+            row=4, column=0, sticky="ew", padx=(0, 8), pady=4
         )
 
         if self.auth.is_admin(self.user):
             ttk.Button(self, text="Manage Users", command=self.manage_users).grid(
-                row=3, column=1, sticky="ew", padx=(0, 8), pady=4
+                row=4, column=1, sticky="ew", padx=(0, 8), pady=4
             )
 
         ttk.Label(self, textvariable=self.status_var, foreground="#444").grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(16, 0)
+            row=5, column=0, columnspan=3, sticky="w", pady=(16, 0)
         )
+        self.progress = ttk.Progressbar(self, mode="indeterminate", length=200)
+        self.progress.grid(row=6, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        self.progress.grid_remove()
         for column in range(3):
             self.columnconfigure(column, weight=1)
 
@@ -183,6 +201,79 @@ class MainFrame(ttk.Frame):
             self.db.upsert_model_resource("remote_check", url, None, "failed")
             self.db.log_operation(self.user["id"], "check_url_failed", str(exc))
             self.after(0, lambda: messagebox.showerror("Network failed", str(exc)))
+
+    def network_test(self):
+        self._run_task(self._network_test_worker, "Testing connectivity...")
+
+    def _network_test_worker(self):
+        result = test_connectivity()
+        self.db.log_operation(self.user["id"], "network_test", json.dumps(result))
+        if result["reachable"]:
+            msg = (f"Network reachable\n"
+                   f"Latency: {result['latency_ms']} ms\n"
+                   f"Resolved IP: {result['resolved_ip']}")
+            self.after(0, lambda: messagebox.showinfo("Network Test", msg))
+        else:
+            self.after(0, lambda: messagebox.showerror(
+                "Network Test", f"Not reachable: {result.get('error', 'unknown')}"))
+
+    def detect_from_url(self):
+        url = simpledialog.askstring(
+            "Detect from URL",
+            "Input an image URL:",
+            parent=self,
+        )
+        if not url:
+            return
+        self._run_task(lambda: self._detect_url_worker(url), "Downloading & detecting...")
+
+    def _detect_url_worker(self, url):
+        try:
+            local_path = download_image_from_url(url)
+        except DownloadError as exc:
+            self.after(0, lambda: messagebox.showerror("Download failed", str(exc)))
+            return
+        output_path, events, summary = self.detector.predict_image(str(local_path))
+        alerts = summary.get("alert_labels", [])
+        self.db.record_detection(
+            self.user["id"], url, summary, alerts, output_path=output_path
+        )
+        self.db.log_operation(
+            self.user["id"], "detect_url", f"{url} -> {output_path}"
+        )
+        message = (
+            f"Source URL: {url}\n"
+            f"Output: {output_path}\n"
+            f"Events: {len(events)}\n"
+            f"Alerts: {', '.join(alerts) if alerts else 'none'}"
+        )
+        self.after(0, lambda: messagebox.showinfo("Detection finished", message))
+
+    def batch_url_check(self):
+        text = simpledialog.askstring(
+            "Batch URL Check",
+            "Input URLs to check (one per line or comma-separated):",
+            parent=self,
+        )
+        if not text:
+            return
+        urls = [u.strip() for line in text.splitlines() for u in line.split(",")
+                if u.strip()]
+        if not urls:
+            return
+        self._run_task(lambda: self._batch_url_worker(urls), "Checking URLs...")
+
+    def _batch_url_worker(self, urls):
+        results = check_urls_batch(urls)
+        self.db.log_operation(
+            self.user["id"], "batch_url_check", f"Checked {len(urls)} URLs"
+        )
+        lines = []
+        for url, result in results.items():
+            status = "OK" if result.get("ok") else "FAIL"
+            detail = result.get("error", result.get("status", ""))
+            lines.append(f"[{status}] {url}  {detail}")
+        self.after(0, lambda: self._show_text("Batch URL Results", "\n".join(lines)))
 
     def show_records(self):
         records = self.db.list_detection_records()
@@ -264,6 +355,8 @@ class MainFrame(ttk.Frame):
 
     def _run_task(self, target, status):
         self.status_var.set(status)
+        self.progress.grid()
+        self.progress.start(10)
 
         def runner():
             try:
@@ -271,9 +364,14 @@ class MainFrame(ttk.Frame):
             except Exception as exc:
                 self.after(0, lambda: messagebox.showerror("Error", str(exc)))
             finally:
-                self.after(0, lambda: self.status_var.set("Ready"))
+                self.after(0, lambda: self._task_done(status))
 
         threading.Thread(target=runner, daemon=True).start()
+
+    def _task_done(self, status):
+        self.progress.stop()
+        self.progress.grid_remove()
+        self.status_var.set("Ready")
 
     def _show_text(self, title, text):
         window = tk.Toplevel(self)
@@ -289,8 +387,8 @@ class StudyMonitorApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Study Behavior Monitor")
-        self.geometry("720x360")
-        self.minsize(640, 320)
+        self.geometry("720x440")
+        self.minsize(640, 400)
 
         self.db = Database()
         self.auth = AuthService(self.db)
