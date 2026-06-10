@@ -8,7 +8,9 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 from ai_core import StudyBehaviorDetector
 from auth import AuthError, AuthService
 from db import Database
-from network_utils import NetworkError, check_url
+from network_utils import (NetworkError, DownloadError, check_url,
+                           check_urls_batch, download_image_from_url,
+                           test_connectivity)
 from visualization import export_alert_chart
 
 
@@ -375,10 +377,11 @@ class MainFrame(ttk.Frame):
         ttk.Label(self, text=title, font=("Segoe UI", 13, "bold")).grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 12)
         )
+        # Row 1: AI detection
         ttk.Button(self, text="Detect Image", command=self.detect_image).grid(
             row=1, column=0, sticky="ew", padx=(0, 8), pady=4
         )
-        ttk.Button(self, text="Start Camera", command=self.start_camera).grid(
+        ttk.Button(self, text="Detect from URL", command=self.detect_from_url).grid(
             row=1, column=1, sticky="ew", padx=(0, 8), pady=4
         )
         ttk.Button(self, text="Check Model URL", command=self.check_model_url).grid(
@@ -396,13 +399,24 @@ class MainFrame(ttk.Frame):
         ttk.Button(self, text="Export Chart", command=self.export_chart).grid(
             row=2, column=3, sticky="ew", pady=4
         )
-        ttk.Button(self, text="Change Password", command=self.change_password).grid(
+        # Row 3: data & records
+        ttk.Button(self, text="Detection Records", command=self.show_records).grid(
             row=3, column=0, sticky="ew", padx=(0, 8), pady=4
+        )
+        ttk.Button(self, text="Operation Logs", command=self.show_logs).grid(
+            row=3, column=1, sticky="ew", padx=(0, 8), pady=4
+        )
+        ttk.Button(self, text="Export Chart", command=self.export_chart).grid(
+            row=3, column=2, sticky="ew", pady=4
+        )
+        # Row 4: account
+        ttk.Button(self, text="Change Password", command=self.change_password).grid(
+            row=4, column=0, sticky="ew", padx=(0, 8), pady=4
         )
 
         if self.auth.is_admin(self.user):
             ttk.Button(self, text="Manage Users", command=self.manage_users).grid(
-                row=3, column=1, sticky="ew", padx=(0, 8), pady=4
+                row=4, column=1, sticky="ew", padx=(0, 8), pady=4
             )
             ttk.Button(self, text="Model Resources", command=self.manage_models).grid(
                 row=3, column=2, sticky="ew", padx=(0, 8), pady=4
@@ -622,6 +636,8 @@ class MainFrame(ttk.Frame):
 
     def _run_task(self, target, status):
         self.status_var.set(status)
+        self.progress.grid()
+        self.progress.start(10)
 
         def runner():
             try:
@@ -629,7 +645,7 @@ class MainFrame(ttk.Frame):
             except Exception as exc:
                 self.after(0, lambda: messagebox.showerror("Error", str(exc)))
             finally:
-                self.after(0, lambda: self.status_var.set("Ready"))
+                self.after(0, lambda: self._task_done(status))
 
         threading.Thread(target=runner, daemon=True).start()
 
@@ -638,8 +654,8 @@ class StudyMonitorApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Study Behavior Monitor")
-        self.geometry("720x360")
-        self.minsize(640, 320)
+        self.geometry("720x440")
+        self.minsize(640, 400)
 
         self.db = Database()
         self.auth = AuthService(self.db)

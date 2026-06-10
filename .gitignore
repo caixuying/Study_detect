@@ -32,3 +32,10 @@ yolov8n-pose.pt
 yolo26n.pt
 models/last.pt
 models/*.onnx
+
+raw_data/
+processed/
+dataset/
+test_*/
+*.docx
+preview_grid.jpg
