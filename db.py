@@ -11,7 +11,6 @@ class Database:
         self.create_tables()
 
     def create_tables(self):
-        #用户表
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -22,7 +21,6 @@ class Database:
             )
         """)
 
-        #模型资源表
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS model_resources (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -35,7 +33,6 @@ class Database:
             )
         """)
 
-        #操作日志表
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS system_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,7 +44,6 @@ class Database:
             )
         """)
 
-        #误识别样本表
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS misclassified_samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -64,7 +60,6 @@ class Database:
             )
         """)
 
-        #训练周期
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS training_cycles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,7 +77,6 @@ class Database:
             )
         """)
 
-        #数据回流
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS data_reflux_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,6 +91,52 @@ class Database:
                 FOREIGN KEY(user_id) REFERENCES users(id)
             )
         """)
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_sessions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                session_name TEXT,
+                start_time TIMESTAMP NOT NULL,
+                end_time TIMESTAMP,
+                total_duration_seconds INTEGER,
+                effective_study_seconds INTEGER,
+                focus_score INTEGER CHECK(focus_score BETWEEN 0 AND 100),
+                total_alerts INTEGER DEFAULT 0,
+                phone_alerts INTEGER DEFAULT 0,
+                sleep_alerts INTEGER DEFAULT 0,
+                eat_alerts INTEGER DEFAULT 0,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+            )
+        """)
+
+        self.cursor.execute("""
+            CREATE TABLE IF NOT EXISTS study_behavior_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                session_id INTEGER,
+                timestamp TIMESTAMP NOT NULL,
+                behavior_type TEXT NOT NULL CHECK(behavior_type IN ('normal', 'phone', 'sleep', 'eat', 'other')),
+                confidence REAL NOT NULL,
+                is_alert INTEGER NOT NULL DEFAULT 0,
+                alert_reason TEXT,
+                source_type TEXT NOT NULL DEFAULT 'image' CHECK(source_type IN ('image', 'camera', 'video')),
+                source_path TEXT,
+                image_path TEXT,
+                output_image_path TEXT,
+                extra_info TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+                FOREIGN KEY(session_id) REFERENCES study_sessions(id) ON DELETE SET NULL
+            )
+        """)
+
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_behavior_user_time ON study_behavior_records(user_id, timestamp)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_behavior_type ON study_behavior_records(behavior_type)")
+        self.cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_user_time ON study_sessions(user_id, start_time)")
 
         self.connection.commit()
 
@@ -154,7 +194,6 @@ class Database:
         self.cursor.execute("DELETE FROM model_resources WHERE name = ?", (name,))
         self.connection.commit()
 
-    # 操作日志
     def log_operation(self, user_id, action, detail=""):
         self.cursor.execute("INSERT INTO system_logs (user_id, action, detail) VALUES (?, ?, ?)",
                             (user_id, action, detail))
@@ -174,13 +213,7 @@ class Database:
             for row in rows
         ]
 
-    #误识别样本相关 
     def insert_misclassified_sample(self, image_path, original_predictions, user_id):
-        """
-        保存误识别样本
-        original_predictions: list 或 dict，自动 JSON 序列化
-        返回新记录的 ID
-        """
         predictions_json = json.dumps(original_predictions, ensure_ascii=False)
         self.cursor.execute("""
             INSERT INTO misclassified_samples (image_path, original_predictions, user_id)
@@ -190,7 +223,6 @@ class Database:
         return self.cursor.lastrowid
 
     def update_misclassified_corrected(self, sample_id, corrected_annotations):
-        """更新用户修正后的标注（JSON 字符串或可序列化对象）"""
         if not isinstance(corrected_annotations, str):
             corrected_annotations = json.dumps(corrected_annotations, ensure_ascii=False)
         self.cursor.execute("""
@@ -201,7 +233,6 @@ class Database:
         self.connection.commit()
 
     def get_misclassified_sample(self, sample_id):
-        """获取单个误识别样本记录"""
         self.cursor.execute("SELECT * FROM misclassified_samples WHERE id = ?", (sample_id,))
         row = self.cursor.fetchone()
         if row:
@@ -220,7 +251,6 @@ class Database:
         return None
 
     def list_misclassified_samples(self, reviewed_only=False):
-        """列出误识别样本，可筛选是否已审核回流"""
         if reviewed_only:
             self.cursor.execute(
                 "SELECT * FROM misclassified_samples WHERE is_reviewed = 1 ORDER BY created_at DESC"
@@ -245,7 +275,6 @@ class Database:
         ]
 
     def update_misclassified_relabel_paths(self, sample_id, relabel_image_path, relabel_label_path):
-        """更新回流后的文件路径，并标记为已审核"""
         self.cursor.execute("""
             UPDATE misclassified_samples
             SET relabel_image_path = ?,
@@ -257,13 +286,10 @@ class Database:
         self.connection.commit()
 
     def delete_misclassified_sample(self, sample_id):
-        """删除误识别样本记录"""
         self.cursor.execute("DELETE FROM misclassified_samples WHERE id = ?", (sample_id,))
         self.connection.commit()
 
-    #训练周期相关
     def create_training_cycle(self, version, base_dataset, created_by):
-        """创建新的训练周期，返回新记录 ID"""
         self.cursor.execute("""
             INSERT INTO training_cycles (version, base_dataset, created_by)
             VALUES (?, ?, ?)
@@ -272,32 +298,24 @@ class Database:
         return self.cursor.lastrowid
 
     def update_training_cycle_status(self, cycle_id, status, mAP=None, model_path=None):
-        """
-        更新训练周期状态、指标和模型路径
-        status: pending / training / completed / failed
-        """
         updates = ["status = ?"]
         params = [status]
-
         if mAP is not None:
             updates.append("mAP = ?")
             params.append(mAP)
         if model_path is not None:
             updates.append("model_path = ?")
             params.append(model_path)
-
         if status == "completed":
             updates.append("finished_at = CURRENT_TIMESTAMP")
         elif status == "training":
             updates.append("started_at = CURRENT_TIMESTAMP")
-
         params.append(cycle_id)
         sql = f"UPDATE training_cycles SET {', '.join(updates)} WHERE id = ?"
         self.cursor.execute(sql, params)
         self.connection.commit()
 
     def get_training_cycles(self):
-        """获取所有训练周期记录，按创建时间倒序"""
         self.cursor.execute("SELECT * FROM training_cycles ORDER BY created_at DESC")
         rows = self.cursor.fetchall()
         return [
@@ -319,7 +337,6 @@ class Database:
 
     def log_data_reflux(self, sample_id, source_image_path, target_image_path,
                         target_label_path, user_id):
-        """记录数据回流操作"""
         self.cursor.execute("""
             INSERT INTO data_reflux_log (sample_id, source_image_path, target_image_path,
                                         target_label_path, user_id)
@@ -327,6 +344,126 @@ class Database:
         """, (sample_id, source_image_path, target_image_path, target_label_path, user_id))
         self.connection.commit()
 
+    def start_study_session(self, user_id, session_name=""):
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.cursor.execute("""
+            INSERT INTO study_sessions (user_id, session_name, start_time, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?)
+        """, (user_id, session_name, now, now, now))
+        self.connection.commit()
+        return self.cursor.lastrowid
+
+    def end_study_session(self, session_id, focus_score=None, effective_seconds=None,
+                          notes=None, alert_stats=None):
+        self.cursor.execute("SELECT start_time FROM study_sessions WHERE id = ?", (session_id,))
+        row = self.cursor.fetchone()
+        if not row:
+            return False
+        start = datetime.strptime(row[0], "%Y-%m-%d %H:%M:%S")
+        duration = int((datetime.now() - start).total_seconds())
+        updates = ["end_time = ?", "total_duration_seconds = ?", "updated_at = ?"]
+        params = [datetime.now().strftime("%Y-%m-%d %H:%M:%S"), duration,
+                  datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+        if focus_score is not None:
+            updates.append("focus_score = ?")
+            params.append(focus_score)
+        if effective_seconds is not None:
+            updates.append("effective_study_seconds = ?")
+            params.append(effective_seconds)
+        if notes is not None:
+            updates.append("notes = ?")
+            params.append(notes)
+        if alert_stats:
+            if "total" in alert_stats:
+                updates.append("total_alerts = ?")
+                params.append(alert_stats["total"])
+            if "phone" in alert_stats:
+                updates.append("phone_alerts = ?")
+                params.append(alert_stats["phone"])
+            if "sleep" in alert_stats:
+                updates.append("sleep_alerts = ?")
+                params.append(alert_stats["sleep"])
+            if "eat" in alert_stats:
+                updates.append("eat_alerts = ?")
+                params.append(alert_stats["eat"])
+        params.append(session_id)
+        sql = f"UPDATE study_sessions SET {', '.join(updates)} WHERE id = ?"
+        self.cursor.execute(sql, params)
+        self.connection.commit()
+        return True
+
+    def list_study_sessions(self, user_id=None, limit=50, offset=0):
+        if user_id:
+            self.cursor.execute("""
+                SELECT * FROM study_sessions
+                WHERE user_id = ?
+                ORDER BY start_time DESC
+                LIMIT ? OFFSET ?
+            """, (user_id, limit, offset))
+        else:
+            self.cursor.execute("""
+                SELECT * FROM study_sessions
+                ORDER BY start_time DESC
+                LIMIT ? OFFSET ?
+            """, (limit, offset))
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def add_behavior_record(self, user_id, behavior_type, confidence, session_id=None,
+                            is_alert=False, alert_reason="", source_type="image",
+                            source_path="", image_path="", output_image_path="", extra_info=None):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        extra_json = json.dumps(extra_info, ensure_ascii=False) if extra_info else None
+        self.cursor.execute("""
+            INSERT INTO study_behavior_records
+            (user_id, session_id, timestamp, behavior_type, confidence, is_alert, alert_reason,
+             source_type, source_path, image_path, output_image_path, extra_info)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (user_id, session_id, timestamp, behavior_type, confidence,
+              1 if is_alert else 0, alert_reason,
+              source_type, source_path, image_path, output_image_path, extra_json))
+        self.connection.commit()
+        return self.cursor.lastrowid
+
+    def get_behavior_records(self, user_id=None, session_id=None, limit=100, offset=0,
+                             behavior_type=None, start_time=None, end_time=None):
+        sql = "SELECT * FROM study_behavior_records WHERE 1=1"
+        params = []
+        if user_id:
+            sql += " AND user_id = ?"
+            params.append(user_id)
+        if session_id:
+            sql += " AND session_id = ?"
+            params.append(session_id)
+        if behavior_type:
+            sql += " AND behavior_type = ?"
+            params.append(behavior_type)
+        if start_time:
+            sql += " AND timestamp >= ?"
+            params.append(start_time)
+        if end_time:
+            sql += " AND timestamp <= ?"
+            params.append(end_time)
+        sql += " ORDER BY timestamp DESC LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        self.cursor.execute(sql, params)
+        rows = self.cursor.fetchall()
+        columns = [desc[0] for desc in self.cursor.description]
+        return [dict(zip(columns, row)) for row in rows]
+
+    def get_behavior_statistics(self, user_id, start_time, end_time):
+        self.cursor.execute("""
+            SELECT behavior_type, COUNT(*) as total, SUM(is_alert) as alerts
+            FROM study_behavior_records
+            WHERE user_id = ? AND timestamp BETWEEN ? AND ?
+            GROUP BY behavior_type
+        """, (user_id, start_time, end_time))
+        rows = self.cursor.fetchall()
+        stats = {}
+        for row in rows:
+            stats[row[0]] = {"total": row[1], "alerts": row[2] or 0}
+        return stats
+
     def close(self):
-        """关闭数据库连接"""
         self.connection.close()
